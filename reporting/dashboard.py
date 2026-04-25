@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ def _hit_rows(high_matches: list[dict]) -> str:
     return "\n".join(rows)
 
 
-def _stat_card(label: str, value: int | str, colour: str = "text-white") -> str:
+def _stat_card(label: str, value: Union[int, str], colour: str = "text-white") -> str:
     return (
         f'<div class="rounded-xl border border-zinc-700/60 bg-zinc-800/60 px-6 py-5">'
         f'<p class="text-xs font-medium uppercase tracking-widest text-zinc-500">{escape(label)}</p>'
@@ -86,7 +87,7 @@ def _stat_card(label: str, value: int | str, colour: str = "text-white") -> str:
 def generate_status_page(
     stats: dict,
     high_matches: list[dict],
-    output_path: str | None = None,
+    output_path: Optional[str] = None,
 ) -> None:
     """
     Generate a Tailwind-styled dark-mode HTML status page and write it to disk.

@@ -2,6 +2,7 @@
 
 from datetime import date
 import re
+from typing import Optional
 
 # Formats tried in order when parsing date strings from job sources.
 _DATE_FORMATS = [
@@ -17,7 +18,7 @@ _DATE_FORMATS = [
 _PARTIAL_FORMATS = {"%d %B", "%d %b"}  # formats that omit the year
 
 
-def parse_job_date(date_str: str) -> date | None:
+def parse_job_date(date_str: str) -> Optional[date]:
     """
     Parse a free-form date string from any job source into a date object.
     For partial strings that omit the year (e.g. "08 April"), the current

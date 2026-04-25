@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from typing import Optional
 from urllib.parse import urljoin
 
 import requests
@@ -101,7 +102,7 @@ class MyJobMagExtractor(JobExtractor):
                 logger.debug("Skipping card: %s", exc)
         return posts
 
-    def _parse_group(self, title_li: Tag) -> JobPost | None:
+    def _parse_group(self, title_li: Tag) -> Optional[JobPost]:
         # --- Title + link ---
         anchor = title_li.find("a", href=True)
         if not anchor:

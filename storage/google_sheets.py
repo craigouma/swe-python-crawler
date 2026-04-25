@@ -10,7 +10,7 @@ Required .env keys:
 import logging
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import gspread
 import requests.exceptions
@@ -55,9 +55,9 @@ class GoogleSheetsClient:
 
     def __init__(
         self,
-        service_account_path: str | None = None,
-        spreadsheet_id: str | None = None,
-        worksheet_name: str | None = None,
+        service_account_path: Optional[str] = None,
+        spreadsheet_id: Optional[str] = None,
+        worksheet_name: Optional[str] = None,
     ) -> None:
         sa_path = service_account_path or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
         ss_id = spreadsheet_id or os.getenv("GOOGLE_SPREADSHEET_ID", "")
@@ -87,7 +87,7 @@ class GoogleSheetsClient:
         )
         return job_link in (existing or [])[1:]
 
-    def append_job(self, job: JobPost, match: "MatchResult | None" = None) -> None:
+    def append_job(self, job: JobPost, match: "Optional[MatchResult]" = None) -> None:
         """
         Append one job as a new row.
         Pass a MatchResult to populate columns D–F; omit it to leave them blank.

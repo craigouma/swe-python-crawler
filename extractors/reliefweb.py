@@ -10,7 +10,7 @@ appname.  The fallback value works for low-volume development use only.
 
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
@@ -48,7 +48,7 @@ class ReliefWebExtractor(JobExtractor):
     Requires a registered appname (free) — set RELIEFWEB_APPNAME in .env.
     """
 
-    def __init__(self, app_name: str | None = None) -> None:
+    def __init__(self, app_name: Optional[str] = None) -> None:
         self._app_name = app_name or os.getenv("RELIEFWEB_APPNAME", "")
         if not self._app_name:
             raise ValueError(
