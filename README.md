@@ -1,128 +1,300 @@
-# Job Ingestion & LLM Matching Pipeline
+# swe-python-crawler
 
-An automated pipeline that scrapes job listings, scores them against a candidate profile using a local LLM, and writes results to Google Sheets.
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)
+![Ollama](https://img.shields.io/badge/AI-Ollama%20%2F%20llama3.2-black?logo=ollama)
+![Google Sheets](https://img.shields.io/badge/Storage-Google%20Sheets-34a853?logo=google-sheets&logoColor=white)
+![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-## How It Works
+An autonomous, AI-driven job aggregation pipeline. It scrapes multiple job sources, filters and deduplicates listings, scores each one against a structured candidate profile using a **local** Llama 3.2 model, writes high-value targets to Google Sheets, and publishes a live HTML health dashboard — all at zero LLM cost.
+
+---
+
+## Overview
+
+Most job boards are noise. This pipeline cuts through it automatically:
+
+- **Fetches** jobs from MyJobMag (web scraping) and ReliefWeb (REST API)
+- **Filters** by posting date — only recent listings pass
+- **Deduplicates** using the job URL as a unique key against the existing Sheet
+- **Scores** each job 0–100 against four candidate profiles via local Llama 3.2
+- **Appends** results with match scores, profile labels, and rationale to Google Sheets
+- **Publishes** a static HTML dashboard showing run stats and all scored jobs
+
+---
+
+## System Architecture
 
 ```
-Extractors → Date Filter → Deduplication → Local LLM Scoring → Google Sheets
+┌─────────────────────────────────────────────────────────────┐
+│                        run_crawler.sh                        │
+│          (checks Ollama → activates env → runs pipeline)    │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                    python main.py
+                           │
+          ┌────────────────▼────────────────┐
+          │           1. FETCH              │
+          │  MyJobMag (BS4 scrape)          │
+          │  ReliefWeb (REST API v2)        │
+          └────────────────┬────────────────┘
+                           │
+          ┌────────────────▼────────────────┐
+          │         2. DATE FILTER          │
+          │  Drop jobs older than cutoff    │
+          └────────────────┬────────────────┘
+                           │
+          ┌────────────────▼────────────────┐
+          │        3. DEDUPLICATE           │
+          │  Check URL against Sheet col G  │
+          └────────────────┬────────────────┘
+                           │
+          ┌────────────────▼────────────────┐
+          │      4. SCORE (local LLM)       │
+          │  ollama / llama3.2              │
+          │  Returns: score, profile,       │
+          │           rationale             │
+          └────────────────┬────────────────┘
+                           │
+          ┌────────────────▼────────────────┐
+          │       5. SAVE TO SHEETS         │
+          │  gspread → Google Sheets        │
+          │  Status defaults: Not Applied   │
+          └────────────────┬────────────────┘
+                           │
+          ┌────────────────▼────────────────┐
+          │     6. GENERATE DASHBOARD       │
+          │  Tailwind HTML → index.html     │
+          │  Served by Apache/Nginx         │
+          └─────────────────────────────────┘
 ```
 
-1. **Extract** — pulls jobs from MyJobMag (HTML scrape) and ReliefWeb (REST API)
-2. **Filter** — drops any job posted before the configured cutoff date
-3. **Deduplicate** — skips jobs whose URL already exists in the sheet
-4. **Score** — sends each job to a local `llama3.2` model via Ollama; returns a 0–100 match score, a best-fit profile label, and a 2-sentence rationale
-5. **Store** — appends scored jobs to a Google Sheet with status `Not Applied`
+---
 
 ## Project Structure
 
 ```
-.
+swe-python-crawler/
 ├── extractors/
-│   ├── base.py            # JobPost dataclass + JobExtractor ABC
-│   ├── myjobmag.py        # HTML scraper (requests + BeautifulSoup)
-│   └── reliefweb.py       # ReliefWeb v2 API client
+│   ├── base.py              # JobPost dataclass + JobExtractor ABC
+│   ├── myjobmag.py          # HTML scraper (requests + BeautifulSoup4)
+│   └── reliefweb.py         # ReliefWeb v2 REST API client
 ├── matching/
-│   └── local_matcher.py   # Ollama/llama3.2 scoring engine (Pydantic output)
+│   └── local_matcher.py     # Ollama/llama3.2 scoring engine (Pydantic output)
 ├── storage/
-│   └── google_sheets.py   # gspread client — schema init, dedup, append
-├── main.py                # Pipeline orchestrator
-├── utils.py               # Date parsing utility
-├── run_crawler.sh         # One-command launcher (handles Ollama + conda)
+│   └── google_sheets.py     # gspread client — schema init, dedup, append
+├── reporting/
+│   └── dashboard.py         # Static HTML dashboard generator (Tailwind CSS)
+├── .github/
+│   └── workflows/
+│       └── deploy.yml       # GitHub Actions CI/CD → VPS deploy
+├── main.py                  # Pipeline orchestrator
+├── utils.py                 # Multi-format date parser
+├── run_crawler.sh           # Production launcher script
 ├── requirements.txt
 └── .env.example
 ```
 
+---
+
 ## Prerequisites
 
-| Tool | Purpose |
-|------|---------|
-| Python 3.10+ | Runtime |
-| [Ollama](https://ollama.com/download) | Local LLM inference |
-| `llama3.2` model | Scoring (pulled via Ollama) |
-| Google Cloud service account | Sheets write access |
-| ReliefWeb appname | API access (free, requires registration) |
+| Requirement | Notes |
+|-------------|-------|
+| Python 3.9+ | Tested on 3.9 and 3.12 |
+| [Ollama](https://ollama.com/download) | Local LLM runtime |
+| `llama3.2` model | ~2 GB, pulled via Ollama |
+| Google Cloud Service Account | Needs Sheets API enabled |
+| Google Sheet | Share it with the service account as **Editor** |
+| ReliefWeb appname | Free registration at [apidoc.reliefweb.int](https://apidoc.reliefweb.int/parameters#appname) |
 
-## Setup
+---
 
-### 1. Clone and install dependencies
+## Environment Variables
 
-```bash
-git clone <repo-url>
-cd swe-python-crawler
-pip install -r requirements.txt
-```
-
-### 2. Pull the LLM model
-
-```bash
-ollama pull llama3.2
-```
-
-### 3. Configure environment variables
+Copy `.env.example` to `.env` and fill in all values:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
-
 ```env
-# ReliefWeb — register at https://apidoc.reliefweb.int/parameters#appname
+# ── ReliefWeb API ─────────────────────────────────────────────
+# Register free at: https://apidoc.reliefweb.int/parameters#appname
 RELIEFWEB_APPNAME=your-approved-appname
 
-# Google Sheets
+# ── Google Sheets ─────────────────────────────────────────────
+# Absolute path to your downloaded service account JSON key file
 GOOGLE_SERVICE_ACCOUNT_JSON=/absolute/path/to/gcp-credentials.json
+
+# The ID from the Sheets URL: /spreadsheets/d/<SPREADSHEET_ID>/edit
 GOOGLE_SPREADSHEET_ID=your-spreadsheet-id
+
+# Worksheet tab name (auto-created if it does not exist)
 GOOGLE_WORKSHEET_NAME=Jobs
+
+# ── Status Dashboard ──────────────────────────────────────────
+# Absolute path where the HTML dashboard is written after each run
+STATUS_PAGE_PATH=/home/craigouma/status.sowerved.tech/index.html
 ```
 
-### 4. Set up Google Sheets access
+> **Security note:** `.env` and `gcp-credentials.json` are both listed in `.gitignore` and must never be committed.
 
-1. Create a service account in Google Cloud Console and download the JSON key
-2. Share your target spreadsheet with the service account's `client_email` as **Editor**
-3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env` to the absolute path of the key file
+---
 
-## Running
+## Google Sheets Schema
 
-```bash
-# Recommended — handles Ollama startup and conda activation automatically
-bash run_crawler.sh
+The pipeline writes to the following fixed column layout:
 
-# With a specific conda environment
-bash run_crawler.sh my_env_name
-
-# Or directly
-python main.py
-```
-
-### Output Sheet Schema
-
-| Column | Field | Notes |
-|--------|-------|-------|
+| Col | Header | Description |
+|-----|--------|-------------|
 | A | Job Title | |
 | B | Company/Org | |
 | C | Source | `MyJobMag` or `ReliefWeb` |
-| D | Match Score | 0–100, set by LLM |
-| E | Best Profile Match | `IT_Support`, `Credit_Analyst`, `Data_Analyst`, `Software_Engineer`, or `None` |
+| D | Match Score | 0–100 integer set by Llama 3.2 |
+| E | Best Profile Match | `IT_Support` · `Credit_Analyst` · `Data_Analyst` · `Software_Engineer` · `None` |
 | F | Match Rationale | 2-sentence LLM explanation |
 | G | Link | Unique key used for deduplication |
 | H | Date Posted | |
 | I | Status | Defaults to `Not Applied` |
 
-## Candidate Profiles Scored Against
+---
 
-| Label | Summary |
-|-------|---------|
-| `IT_Support` | Linux, VPS, TCP/IP, Apache, Bash/Python automation |
-| `Credit_Analyst` | Credit risk, KYC, PAR monitoring, SQL, BigQuery |
-| `Data_Analyst` | BigQuery, ETL, Plotly Dash, Power BI, Python/SQL/R |
-| `Software_Engineer` | Python, FastAPI, Docker, GCP, ReactJS, Node.js |
+## Local Setup & Execution
 
-A score **≥ 75** is flagged as a High Match in the pipeline summary log.
+### 1. Clone and install
 
-## Adding a New Job Source
+```bash
+git clone https://github.com/<your-username>/swe-python-crawler.git
+cd swe-python-crawler
+pip install -r requirements.txt
+```
+
+### 2. Pull the model
+
+```bash
+ollama pull llama3.2
+```
+
+### 3. Configure credentials
+
+```bash
+cp .env.example .env
+# Edit .env with your values
+```
+
+### 4. Run
+
+```bash
+# Start Ollama (keep running in background or as a service)
+ollama serve
+
+# In a separate terminal
+python main.py
+```
+
+Or use the launcher script which handles all of the above automatically:
+
+```bash
+bash run_crawler.sh
+```
+
+### Sample output
+
+```
+00:37:28  INFO  pipeline  Fetched 20 job(s) total.
+00:37:28  INFO  pipeline  SKIP (too old: 2026-04-08)  [MyJobMag]  DevOps Engineer
+00:39:47  INFO  matching.local_matcher  Local [llama3.2] scored 'Financial & Data Analyst': 92/100 → Data_Analyst
+00:39:47  INFO  storage.google_sheets   Appended: [MyJobMag] Financial & Data Analyst — Solar Panda
+00:40:03  INFO  pipeline  Summary: 20 fetched | 8 new appended | 2 High Match(es) found (score >= 75).
+00:40:03  INFO  reporting.dashboard     Status page written to /home/craigouma/status.sowerved.tech/index.html (permissions: 644)
+```
+
+---
+
+## VPS Deployment & Security
+
+### Isolated service user
+
+The pipeline runs under a dedicated, least-privilege Linux user `crawler_svc` with no login shell and no sudo rights. This contains the blast radius if the process is ever compromised.
+
+```bash
+# On the VPS — create the service user (run once as root)
+useradd --system --no-create-home --shell /usr/sbin/nologin crawler_svc
+```
+
+Sensitive files on the VPS are owned by `crawler_svc` and set to `600`:
+
+```bash
+chmod 600 /home/crawler_svc/swe-python-crawler/.env
+chmod 600 /home/crawler_svc/swe-python-crawler/gcp-credentials.json
+```
+
+### CI/CD via GitHub Actions
+
+Every push to `main` triggers `.github/workflows/deploy.yml`, which:
+
+1. Checks out the repository
+2. Uses `appleboy/scp-action` to copy all files to the VPS (excludes `.git` and `.github`)
+3. Uses `appleboy/ssh-action` to create/update the virtual environment and install dependencies
+
+Configure the following **GitHub Secrets** in your repository settings:
+
+| Secret | Value |
+|--------|-------|
+| `SERVER_HOST` | VPS IP or hostname |
+| `SERVER_USER` | `crawler_svc` |
+| `SSH_PRIVATE_KEY` | Private key for `crawler_svc` |
+
+### Cron schedule
+
+After deployment, schedule the crawler to run every 6 hours under the `crawler_svc` user:
+
+```bash
+crontab -e -u crawler_svc
+```
+
+```cron
+0 */6 * * * /home/crawler_svc/swe-python-crawler/run_crawler.sh >> /home/crawler_svc/crawler.log 2>&1
+```
+
+---
+
+## The Dashboard
+
+After every run, the pipeline generates a self-contained `index.html` using Tailwind CSS (CDN) and writes it to `STATUS_PAGE_PATH` with `644` permissions so the web server can read it.
+
+The page displays:
+
+- **System status badges** — Ollama and Scrapers online indicators
+- **Run statistics** — Total fetched, skipped, newly scored, and high-match count
+- **Recently Scored Jobs table** — all jobs processed in the current run with score, profile label, and pagination (10 rows per page)
+
+Serve the output directory from Apache or Nginx as a standard static site. No backend required.
+
+```nginx
+server {
+    listen 80;
+    server_name status.sowerved.tech;
+    root /home/craigouma/status.sowerved.tech;
+    index index.html;
+}
+```
+
+---
+
+## Extending the Pipeline
+
+To add a new job source:
 
 1. Create `extractors/your_source.py` — subclass `JobExtractor`, implement `fetch(limit) -> list[JobPost]`
 2. Export it from `extractors/__init__.py`
 3. Add it to `fetch_all()` in `main.py`
+
+The date filter, deduplication, scoring, and storage steps apply automatically — no other changes needed.
+
+---
+
+## License
+
+MIT
