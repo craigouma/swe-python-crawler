@@ -2,9 +2,11 @@
 Job ingestion pipeline — Phase 4.
 
 Flow: fetch → date-filter → deduplicate → LLM score → append to Google Sheets
+      → generate HTML status page
 """
 
 import logging
+import os
 import sys
 from datetime import date
 
@@ -13,6 +15,7 @@ from dotenv import load_dotenv
 from extractors import MyJobMagExtractor, ReliefWebExtractor
 from extractors.base import JobPost
 from matching import LocalMatcher
+from reporting import generate_status_page
 from storage import GoogleSheetsClient
 from utils import parse_job_date
 
@@ -27,6 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 DATE_CUTOFF = date(2026, 4, 20)
+HIGH_MATCH_THRESHOLD = 75
 
 
 # ── Pipeline steps ────────────────────────────────────────────────────────────
@@ -47,42 +51,48 @@ def fetch_all() -> list[JobPost]:
     return jobs
 
 
-def filter_by_date(jobs: list[JobPost]) -> list[JobPost]:
+def filter_by_date(jobs: list[JobPost]) -> tuple[list[JobPost], int]:
+    """Returns (kept_jobs, skipped_old_count)."""
     kept = []
+    skipped_old = 0
     for job in jobs:
         parsed = parse_job_date(job.date_posted)
         if parsed is None:
             logger.warning(
                 "SKIP (unparseable date '%s')  %s", job.date_posted, job.title
             )
+            skipped_old += 1
         elif parsed < DATE_CUTOFF:
             logger.info(
                 "SKIP (too old: %s)  [%s]  %s", parsed, job.source, job.title
             )
+            skipped_old += 1
         else:
             kept.append(job)
     logger.info("%d job(s) passed date filter (cutoff: %s).", len(kept), DATE_CUTOFF)
-    return kept
-
-
-HIGH_MATCH_THRESHOLD = 75
+    return kept, skipped_old
 
 
 def ingest(
     jobs: list[JobPost],
     sheets: GoogleSheetsClient,
     matcher: LocalMatcher,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[dict]]:
     """
     Deduplicates, scores, and appends jobs.
-    Returns (new_appended, high_matches).
+    Returns (new_appended, skipped_dup, high_match_jobs).
+
+    high_match_jobs is a list of dicts ready for the dashboard:
+        title, company, score, profile, link
     """
     new_appended = 0
-    high_matches = 0
+    skipped_dup = 0
+    high_match_jobs: list[dict] = []
 
     for job in jobs:
         if sheets.is_duplicate(job.link):
             logger.info("SKIP (duplicate)  [%s]  %s", job.source, job.title)
+            skipped_dup += 1
             continue
 
         match = matcher.score(job)
@@ -96,10 +106,17 @@ def ingest(
 
         sheets.append_job(job, match)
         new_appended += 1
-        if match.match_score >= HIGH_MATCH_THRESHOLD:
-            high_matches += 1
 
-    return new_appended, high_matches
+        if match.match_score >= HIGH_MATCH_THRESHOLD:
+            high_match_jobs.append({
+                "title":   job.title,
+                "company": job.company,
+                "score":   match.match_score,
+                "profile": match.best_profile,
+                "link":    job.link,
+            })
+
+    return new_appended, skipped_dup, high_match_jobs
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -107,9 +124,10 @@ def ingest(
 def main() -> None:
     # 1. Fetch
     all_jobs = fetch_all()
+    total_fetched = len(all_jobs)
 
     # 2. Date filter
-    recent_jobs = filter_by_date(all_jobs)
+    recent_jobs, skipped_old = filter_by_date(all_jobs)
     if not recent_jobs:
         logger.info("Nothing to process. Exiting.")
         return
@@ -125,15 +143,28 @@ def main() -> None:
     matcher = LocalMatcher()
 
     # 5. Deduplicate → score → append
-    new_appended, high_matches = ingest(recent_jobs, sheets, matcher)
+    new_appended, skipped_dup, high_match_jobs = ingest(recent_jobs, sheets, matcher)
 
     logger.info(
         "Summary: %d fetched | %d new appended | %d High Match(es) found (score >= %d).",
-        len(all_jobs),
+        total_fetched,
         new_appended,
-        high_matches,
+        len(high_match_jobs),
         HIGH_MATCH_THRESHOLD,
     )
+
+    # 6. Generate HTML status page
+    stats = {
+        "total_fetched": total_fetched,
+        "skipped_old":   skipped_old,
+        "skipped_dup":   skipped_dup,
+        "new_scored":    new_appended,
+    }
+    status_path = os.getenv(
+        "STATUS_PAGE_PATH",
+        "/home/craigouma/status.sowerved.tech/index.html",
+    )
+    generate_status_page(stats, high_match_jobs, output_path=status_path)
 
 
 if __name__ == "__main__":
