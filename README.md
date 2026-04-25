@@ -25,48 +25,49 @@ Most job boards are noise. This pipeline cuts through it automatically:
 
 ## System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        run_crawler.sh                        │
-│          (checks Ollama → activates env → runs pipeline)    │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                    python main.py
-                           │
-          ┌────────────────▼────────────────┐
-          │           1. FETCH              │
-          │  MyJobMag (BS4 scrape)          │
-          │  ReliefWeb (REST API v2)        │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │         2. DATE FILTER          │
-          │  Drop jobs older than cutoff    │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │        3. DEDUPLICATE           │
-          │  Check URL against Sheet col G  │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │      4. SCORE (local LLM)       │
-          │  ollama / llama3.2              │
-          │  Returns: score, profile,       │
-          │           rationale             │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │       5. SAVE TO SHEETS         │
-          │  gspread → Google Sheets        │
-          │  Status defaults: Not Applied   │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │     6. GENERATE DASHBOARD       │
-          │  Tailwind HTML → index.html     │
-          │  Served by Apache/Nginx         │
-          └─────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph Launcher["🚀 run_crawler.sh"]
+        SH["Checks Ollama health\nActivates venv\nInvokes main.py"]
+    end
+
+    subgraph Sources["📡 Job Sources"]
+        RW["ReliefWeb\nREST API v2\nup to 20 jobs"]
+        MJM["MyJobMag\nBeautifulSoup4 scrape\nup to 20 jobs/category"]
+    end
+
+    subgraph LLM["🤖 Local LLM  ·  Ollama"]
+        OL["llama3.2\nReturns: score 0–100\nbest_profile + rationale"]
+    end
+
+    subgraph Pipeline["⚙️  main.py — Pipeline Orchestrator"]
+        FETCH["1 · FETCH\nMerges all sources"]
+        FILTER["2 · DATE FILTER\nDrop listings older than cutoff"]
+        DEDUP["3 · DEDUPLICATE\nCheck URL vs Sheet col G"]
+        SCORE["4 · SCORE"]
+        SAVE["5 · SAVE TO SHEETS\nStatus → Not Applied"]
+        DASH["6 · GENERATE DASHBOARD"]
+    end
+
+    subgraph Storage["🗄️  Storage"]
+        GS[("Google Sheets\nJobs worksheet\n9-column schema")]
+    end
+
+    subgraph Output["🌐 Output"]
+        HTML["index.html\nTailwind dark-mode dashboard\nServed by Nginx"]
+    end
+
+    SH -->|"python main.py"| FETCH
+    RW -->|"JSON"| FETCH
+    MJM -->|"Parsed HTML"| FETCH
+    FETCH --> FILTER
+    FILTER -->|"Recent listings only"| DEDUP
+    DEDUP -->|"New URLs only"| SCORE
+    SCORE <-->|"job description"| OL
+    SCORE -->|"score · profile · rationale"| SAVE
+    SAVE --> GS
+    SAVE --> DASH
+    DASH --> HTML
 ```
 
 ---
