@@ -1,20 +1,23 @@
 """
-Local LLM matching engine — Phase 3 (Ollama).
+Local LLM matching engine — Ollama / llama3.2.
 
-Runs entirely on-device via Ollama — no API keys, no rate limits, no cost.
-Requires Ollama to be running:  ollama serve
-Requires the model to be pulled: ollama pull llama3.2
+Chain-of-Thought schema:  missing_critical_skills → rationale → best_profile → match_score
 
-No .env keys needed.
+Field order is the reasoning chain. The model must enumerate skill gaps before it can
+write a rationale, and must write the rationale before it can produce a score. This
+prevents the "high score first, contradictory rationale after" hallucination pattern.
+
+A Pydantic model_validator enforces the gap-count penalty as a hard constraint so the
+model cannot talk its way around it.
 """
 
 import json
 import logging
-from typing import Literal
+from typing import List, Literal
 
 import ollama
 from ollama import ResponseError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from extractors.base import JobPost
 
@@ -22,10 +25,22 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "llama3.2"
 
-# ── Pydantic schema ────────────────────────────────────────────────────────────
+
+# ── Pydantic schema (field order = reasoning order) ───────────────────────────
 
 class MatchResult(BaseModel):
-    match_score: int = Field(ge=0, le=100)
+    # Step 1 — gaps first: forces the model to think about what's missing
+    missing_critical_skills: List[str] = Field(
+        description=(
+            "Skills explicitly required by the job that the candidate clearly lacks. "
+            "Be specific (e.g. 'SWIFT networking', 'SAP FICO'). Empty list if none."
+        )
+    )
+    # Step 2 — rationale references the gaps already committed to above
+    rationale: str = Field(
+        description="2 sentences, blunt and specific. Reference the gaps or matches identified above."
+    )
+    # Step 3 — profile chosen after reasoning, not before
     best_profile: Literal[
         "IT_Support",
         "Credit_Analyst",
@@ -33,20 +48,49 @@ class MatchResult(BaseModel):
         "Software_Engineer",
         "None",
     ]
-    rationale: str  # max 2 sentences, enforced in the prompt
+    # Step 4 — score is last; the model calculates it after all reasoning is locked in
+    match_score: int = Field(ge=0, le=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_gap_penalty(cls, values: dict) -> dict:
+        """
+        Hard-clamp match_score based on the number of critical skill gaps.
+        This is a deterministic safety net — the model cannot hallucinate past it.
+
+          3+ gaps  → score capped at 35  (role requires skills the candidate doesn't have)
+          1–2 gaps → score capped at 65  (partial match at best)
+          0 gaps   → full 0–100 range applies
+        """
+        missing = values.get("missing_critical_skills", [])
+        score = values.get("match_score", 0)
+        n = len(missing) if isinstance(missing, list) else 0
+
+        if n >= 3 and score > 35:
+            values["match_score"] = 35
+        elif n >= 1 and score > 65:
+            values["match_score"] = 65
+
+        # Enforce profile/score consistency: "None" is only valid below 20
+        if values.get("best_profile") == "None" and score >= 20:
+            values["best_profile"] = "IT_Support"  # safest fallback; prompt prevents this
+
+        return values
+
 
 _FALLBACK = MatchResult(
-    match_score=0,
-    best_profile="None",
+    missing_critical_skills=[],
     rationale="Local matcher error — result unavailable.",
+    best_profile="None",
+    match_score=0,
 )
 
-# ── Prompts ────────────────────────────────────────────────────────────────────
+
+# ── System prompt ──────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """
-You are a ruthless, highly-calibrated technical recruiter evaluating job postings
-for a single candidate. You MUST use the full 0–100 scoring scale. Do NOT hedge.
-Do NOT cluster scores around 50–65. Commit to a number.
+You are a ruthless, highly-calibrated technical recruiter evaluating a job posting
+for a single candidate. You think step-by-step and never skip steps.
 
 CANDIDATE: Craig Carlos Ouma
 
@@ -66,62 +110,79 @@ Profile 4 — Software_Engineer:
   5+ yrs. Full-stack & ML. Python, ReactJS, Node.js, FastAPI, Docker, GCP,
   Git, ETL, Plotly Dash.
 
-CALIBRATION RULES — follow these exactly:
-  - Score 90–100: job explicitly requires Python/SQL/Linux/BigQuery/ETL and
-    matches at least one profile almost perfectly. No stretch required.
-  - Score 75–89: strong match to one profile; one or two minor gaps.
-  - Score 40–74: reserve ONLY for genuine split decisions — the role shares
-    some overlap but also demands skills Craig clearly lacks. Do not use this
-    range as a safe default.
-  - Score 15–39: job requires stacks Craig does not know (Java/.NET/SAP only,
-    no Python), or is semi-technical/managerial with thin technical content.
-  - Score 0–14: zero overlap — teaching, pure sales, HR, legal, unrelated field.
+─────────────────────────────────────────────────────────────────────────────
+EVALUATION PROCESS — you MUST follow these four steps in strict order:
 
-PROFILE ASSIGNMENT RULES — mandatory:
-  - NEVER set best_profile to "None" if match_score is 20 or higher.
-    At that score there is enough overlap to name the closest profile.
-  - Pick the profile whose skill set overlaps the most with the job, even if
-    the match is imperfect. Choosing the wrong named profile is better than
-    choosing "None" for a scored role.
-  - Only use "None" when match_score is 0–19 AND the job has zero overlap with
-    any of the four profiles.
+STEP 1 — missing_critical_skills (output this field first):
+  Read the job description carefully. List every skill, technology, certification,
+  or domain knowledge that the job explicitly requires AND that Craig clearly does
+  not have. Be specific and literal (e.g. "SWIFT/KEPSS RTGS", "SAP FICO module",
+  "Kubernetes CKA certification", "IFRS 9 credit modelling").
+  If nothing critical is missing, output an empty list: []
 
-ANTI-HEDGING DIRECTIVES:
-  - Never give a score of 50, 55, 60, or 65 unless you can articulate exactly
-    why the role is genuinely in-between. If you cannot, push the score up or down.
-  - A DevOps/Platform Engineer role using Python, Docker, GCP scores ≥ 80.
-  - A Data Analyst role with BigQuery and ETL scores ≥ 85.
-  - A Software Engineer role with Python and FastAPI scores ≥ 80.
-  - A Credit/Financial Analyst role with SQL and risk modelling scores ≥ 80.
-  - A role that only mentions Java, C#, .NET, or SAP with no Python scores ≤ 25.
-  - A teaching, HR, or purely administrative role scores ≤ 10.
+STEP 2 — rationale (output this field second):
+  Write exactly 2 sentences explaining your evaluation. You must reference the
+  specific gaps identified in Step 1 OR the specific matches if there are no gaps.
+  Do not introduce new information. Be blunt.
 
-YOUR TASK:
+STEP 3 — best_profile (output this field third):
+  Based on your reasoning above, name the closest matching profile.
+  Rules:
+    - NEVER output "None" if match_score will be 20 or higher.
+    - If multiple profiles partially match, pick the one with the greatest overlap.
+    - Only output "None" when there is zero meaningful overlap with any profile.
+
+STEP 4 — match_score (output this field last):
+  Calculate the final integer score (0–100) ONLY after completing Steps 1–3.
+
+  PENALTY RULES — mandatory, not suggestions:
+    - 3 or more items in missing_critical_skills → score MUST be ≤ 35.
+    - 1–2 items in missing_critical_skills      → score MUST be ≤ 65.
+    - Empty missing_critical_skills             → use the full scale below.
+
+  CALIBRATION (applies after penalties):
+    - 90–100: explicit match on Python/SQL/Linux/BigQuery/ETL. No stretch needed.
+    - 75–89:  strong match to one profile; one or two minor gaps.
+    - 40–74:  genuine split — real overlap but real gaps too. Not a safe default.
+    - 15–39:  unfamiliar stack (Java/.NET/SAP only, no Python) or thin technical content.
+    - 0–14:   zero overlap — teaching, pure sales, HR, legal.
+
+  ANTI-HEDGING: never output 50, 55, 60, or 65 without a clear reason.
+    DevOps+Python+Docker+GCP        → ≥ 80
+    Data Analyst+BigQuery+ETL       → ≥ 85
+    Software Engineer+Python+FastAPI → ≥ 80
+    Credit/Financial Analyst+SQL+risk → ≥ 80
+    Java/.NET/SAP only, no Python   → ≤ 25
+    Teaching / HR / admin           → ≤ 10
+
+─────────────────────────────────────────────────────────────────────────────
+OUTPUT FORMAT:
   Return ONLY a valid JSON object — no markdown, no extra text, nothing else.
-  The JSON must have exactly these three keys:
-    "match_score"  : integer 0–100
-    "best_profile" : one of "IT_Support", "Credit_Analyst", "Data_Analyst",
-                     "Software_Engineer", or "None"
-    "rationale"    : string, maximum 2 sentences, blunt and specific
+  Fields MUST appear in exactly this order:
+    "missing_critical_skills" : array of strings (empty array if none)
+    "rationale"               : string, exactly 2 sentences
+    "best_profile"            : one of "IT_Support", "Credit_Analyst",
+                                "Data_Analyst", "Software_Engineer", "None"
+    "match_score"             : integer 0–100
 """.strip()
 
 
 # ── Matcher class ──────────────────────────────────────────────────────────────
 
 class LocalMatcher:
-    """Scores a JobPost against Craig's profile using a local Ollama model."""
+    """Scores a JobPost against the candidate profile using a local Ollama model."""
 
     def __init__(self, model: str = _MODEL) -> None:
         self._model = model
 
     def score(self, job: JobPost) -> MatchResult:
         """
-        Send the job to the local Ollama model and return a MatchResult.
-        Returns _FALLBACK on any error so the pipeline never crashes.
+        Send the job to Ollama and return a MatchResult.
+        Falls back to _FALLBACK on any error so the pipeline never crashes.
         """
         user_prompt = (
             f"Job Title: {job.title}\n"
-            f"Company: {job.company}\n\n"
+            f"Company:   {job.company}\n\n"
             f"Description:\n{job.description[:1500]}"
         )
 
@@ -132,20 +193,22 @@ class LocalMatcher:
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user",   "content": user_prompt},
                 ],
-                format="json",
+                format=MatchResult.model_json_schema(),
             )
             raw = response.message.content
             result = MatchResult.model_validate(json.loads(raw))
             logger.info(
-                "Local [%s] scored '%s': %d/100 → %s",
-                self._model, job.title, result.match_score, result.best_profile,
+                "Local [%s] scored '%s': %d/100 → %s  (gaps: %s)",
+                self._model,
+                job.title,
+                result.match_score,
+                result.best_profile,
+                result.missing_critical_skills or "none",
             )
             return result
 
         except ConnectionError:
-            logger.error(
-                "Ollama not running — start it with 'ollama serve'"
-            )
+            logger.error("Ollama not running — start it with 'ollama serve'")
             return _FALLBACK
 
         except ResponseError as exc:
@@ -153,9 +216,7 @@ class LocalMatcher:
             return _FALLBACK
 
         except (json.JSONDecodeError, ValidationError) as exc:
-            logger.error(
-                "Failed to parse Ollama response for '%s': %s", job.title, exc
-            )
+            logger.error("Failed to parse Ollama response for '%s': %s", job.title, exc)
             return _FALLBACK
 
         except Exception as exc:  # noqa: BLE001
