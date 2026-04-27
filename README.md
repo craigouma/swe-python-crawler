@@ -161,40 +161,69 @@ The pipeline writes to the following fixed column layout:
 
 ---
 
-## Local Setup & Execution
+## Running Locally
+
+This section covers everything you need to run the pipeline on your own machine and adapt it to your CV.
 
 ### 1. Clone and install
 
 ```bash
 git clone https://github.com/<your-username>/swe-python-crawler.git
 cd swe-python-crawler
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Pull the model
+### 2. Install and start Ollama
+
+Download Ollama from [ollama.com/download](https://ollama.com/download) and install it for your OS. Then pull the model:
 
 ```bash
 ollama pull llama3.2
 ```
 
-### 3. Configure credentials
+Ollama must be running before you start the pipeline. On macOS/Linux it runs as a background service after install. If it isn't running, start it manually:
+
+```bash
+ollama serve
+```
+
+### 3. Set up Google Sheets
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com), create a project, and enable the **Google Sheets API** and **Google Drive API**.
+2. Under **IAM & Admin → Service Accounts**, create a service account and download its JSON key file.
+3. Create a new Google Sheet, note the spreadsheet ID from the URL (`/spreadsheets/d/<ID>/edit`), and share the sheet with the service account email as **Editor**.
+
+### 4. Register a ReliefWeb appname
+
+Submit the free registration form at [apidoc.reliefweb.int/parameters#appname](https://apidoc.reliefweb.int/parameters#appname). Approval usually takes a few hours. Use any descriptive name (e.g. `yourname-job-crawler`).
+
+### 5. Configure your `.env`
 
 ```bash
 cp .env.example .env
-# Edit .env with your values
 ```
 
-### 4. Run
+Edit `.env` with your values:
+
+```env
+RELIEFWEB_APPNAME=your-approved-appname
+GOOGLE_SERVICE_ACCOUNT_JSON=/absolute/path/to/gcp-credentials.json
+GOOGLE_SPREADSHEET_ID=your-spreadsheet-id
+GOOGLE_WORKSHEET_NAME=Jobs
+STATUS_PAGE_PATH=/tmp/crawler_status/index.html
+```
+
+For local use, set `STATUS_PAGE_PATH` to any writable directory. The pipeline creates it if it doesn't exist.
+
+### 6. Run
 
 ```bash
-# Start Ollama (keep running in background or as a service)
-ollama serve
-
-# In a separate terminal
 python main.py
 ```
 
-Or use the launcher script which handles all of the above automatically:
+Or use the launcher script (checks Ollama, activates venv, then runs):
 
 ```bash
 bash run_crawler.sh
@@ -203,12 +232,110 @@ bash run_crawler.sh
 ### Sample output
 
 ```
-00:37:28  INFO  pipeline  Fetched 20 job(s) total.
+00:37:28  INFO  pipeline  Fetched 36 job(s) total.
 00:37:28  INFO  pipeline  SKIP (too old: 2026-04-08)  [MyJobMag]  DevOps Engineer
 00:39:47  INFO  matching.local_matcher  Local [llama3.2] scored 'Financial & Data Analyst': 92/100 → Data_Analyst
 00:39:47  INFO  storage.google_sheets   Appended: [MyJobMag] Financial & Data Analyst — Solar Panda
-00:40:03  INFO  pipeline  Summary: 20 fetched | 8 new appended | 2 High Match(es) found (score >= 75).
-00:40:03  INFO  reporting.dashboard     Status page written to /home/craigouma/status.sowerved.tech/index.html (permissions: 644)
+00:40:03  INFO  pipeline  Summary: 36 fetched | 8 new appended | 2 High Match(es) found (score >= 75).
+00:40:03  INFO  reporting.dashboard     Status page written to /tmp/crawler_status/index.html (permissions: 644)
+```
+
+---
+
+## Adapting to Your CV
+
+The pipeline is built around a single candidate profile defined in `matching/local_matcher.py`. Swap in your own details and the scoring engine recalibrates automatically — no other files need changing.
+
+### Changing candidate name and profiles
+
+Open `matching/local_matcher.py` and edit the `_SYSTEM_PROMPT` string. The relevant block starts around line 46:
+
+```python
+_SYSTEM_PROMPT = """
+...
+CANDIDATE: Your Name Here
+
+Profile 1 — IT_Support:
+  Describe your IT support skills and years of experience here.
+
+Profile 2 — Credit_Analyst:
+  Describe your finance/credit skills here.
+
+Profile 3 — Data_Analyst:
+  Describe your data skills, tools, and years of experience here.
+
+Profile 4 — Software_Engineer:
+  Describe your engineering stack and experience here.
+...
+"""
+```
+
+**Rules:**
+- Keep the four profile labels exactly as-is (`IT_Support`, `Credit_Analyst`, `Data_Analyst`, `Software_Engineer`) — they are validated by Pydantic and referenced in the dashboard colour map.
+- Be specific about tools and years. The more precise your profile description, the more accurate the scoring.
+- If a profile type doesn't apply to you (e.g. you have no finance background), replace its description with a clearly irrelevant skill set so the model won't mis-assign jobs to it, or remove it by also updating the `Literal[...]` type in `MatchResult` and the `_PROFILE_COLOURS` dict in `reporting/dashboard.py`.
+
+### Renaming profiles
+
+If you want different profile names (e.g. `DevOps_Engineer` instead of `IT_Support`):
+
+1. **`matching/local_matcher.py`** — update the label in `_SYSTEM_PROMPT` and the `Literal[...]` type in `MatchResult`:
+
+```python
+best_profile: Literal[
+    "DevOps_Engineer",   # renamed from IT_Support
+    "Credit_Analyst",
+    "Data_Analyst",
+    "Software_Engineer",
+    "None",
+]
+```
+
+2. **`reporting/dashboard.py`** — add the new name to `_PROFILE_COLOURS` with your chosen Tailwind colour classes:
+
+```python
+_PROFILE_COLOURS = {
+    "DevOps_Engineer":   "bg-amber-500/20 text-amber-300 ring-amber-500/40",
+    ...
+}
+```
+
+3. **`storage/google_sheets.py`** — no changes needed; the profile label is written as a plain string to column E.
+
+### Adjusting the date cutoff
+
+The pipeline skips jobs older than `DATE_CUTOFF` in `main.py`:
+
+```python
+DATE_CUTOFF = date(2026, 4, 20)
+```
+
+Update this to today's date (or earlier) before each use so recent listings aren't filtered out.
+
+### Targeting different job categories
+
+**MyJobMag** — the scraper fetches from hard-coded category URLs in `extractors/myjobmag.py`. Add or replace URLs in the `_CATEGORY_URLS` list to target different fields:
+
+```python
+_CATEGORY_URLS = [
+    "https://www.myjobmag.co.ke/jobs-by-field/information-technology",
+    "https://www.myjobmag.co.ke/jobs-by-field/research-data-analysis",
+    "https://www.myjobmag.co.ke/jobs-by-field/engineering",
+    # add more category URLs here
+]
+```
+
+Browse [myjobmag.co.ke/jobs-by-field](https://www.myjobmag.co.ke/jobs-by-field) to find the right paths.
+
+**ReliefWeb** — keyword and theme filters live in `extractors/reliefweb.py`. Edit `_TITLE_KEYWORDS` to add terms relevant to your field:
+
+```python
+_TITLE_KEYWORDS = [
+    "data engineer",
+    "software engineer",
+    "devops",
+    # add your terms here
+]
 ```
 
 ---
@@ -263,13 +390,21 @@ crontab -e -u crawler_svc
 
 ## The Dashboard
 
-After every run, the pipeline generates a self-contained `index.html` using Tailwind CSS (CDN) and writes it to `STATUS_PAGE_PATH` with `644` permissions so the web server can read it.
+After every run the pipeline writes three files to the `STATUS_PAGE_PATH` directory:
+
+| File | Purpose |
+|------|---------|
+| `index.html` | Static JS shell — fetches the JSON files at load time and every 5 minutes |
+| `jobs_history.json` | Persistent list of every job ever scored, newest first. New jobs are prepended; nothing is ever cleared |
+| `stats_latest.json` | Stats from the most recent run (fetched, skipped, scored, high matches) |
 
 The page displays:
 
 - **System status badges** — Ollama and Scrapers online indicators
-- **Run statistics** — Total fetched, skipped, newly scored, and high-match count
-- **Recently Scored Jobs table** — all jobs processed in the current run with score, profile label, and pagination (10 rows per page)
+- **Latest run statistics** — updates automatically when a new crawl completes
+- **All Scored Jobs table** — full cross-run history, newest at the top, with a "Crawled At" timestamp per row and 10-row pagination
+
+The browser auto-polls the JSON files every 5 minutes, so the page stays live without a manual refresh. If a crawl finds zero new jobs, the table is untouched.
 
 Serve the output directory from Apache or Nginx as a standard static site. No backend required.
 

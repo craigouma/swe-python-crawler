@@ -77,6 +77,15 @@ CALIBRATION RULES — follow these exactly:
     no Python), or is semi-technical/managerial with thin technical content.
   - Score 0–14: zero overlap — teaching, pure sales, HR, legal, unrelated field.
 
+PROFILE ASSIGNMENT RULES — mandatory:
+  - NEVER set best_profile to "None" if match_score is 20 or higher.
+    At that score there is enough overlap to name the closest profile.
+  - Pick the profile whose skill set overlaps the most with the job, even if
+    the match is imperfect. Choosing the wrong named profile is better than
+    choosing "None" for a scored role.
+  - Only use "None" when match_score is 0–19 AND the job has zero overlap with
+    any of the four profiles.
+
 ANTI-HEDGING DIRECTIVES:
   - Never give a score of 50, 55, 60, or 65 unless you can articulate exactly
     why the role is genuinely in-between. If you cannot, push the score up or down.
@@ -113,7 +122,7 @@ class LocalMatcher:
         user_prompt = (
             f"Job Title: {job.title}\n"
             f"Company: {job.company}\n\n"
-            f"Description:\n{job.description[:3000]}"
+            f"Description:\n{job.description[:1500]}"
         )
 
         try:

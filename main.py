@@ -40,7 +40,7 @@ def fetch_all() -> list[JobPost]:
 
     try:
         rw = ReliefWebExtractor()
-        jobs += rw.fetch(limit=20)
+        jobs += rw.fetch(limit=50, since=DATE_CUTOFF)
     except ValueError as exc:
         logger.warning("ReliefWeb skipped: %s", exc)
 
@@ -113,6 +113,8 @@ def ingest(
             "company": job.company,
             "score":   match.match_score,
             "profile": match.best_profile,
+            "source":  job.source,
+            "link":    job.link,
         })
 
         if match.match_score >= HIGH_MATCH_THRESHOLD:

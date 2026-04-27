@@ -10,6 +10,7 @@ appname.  The fallback value works for low-volume development use only.
 
 import logging
 import os
+from datetime import date
 from typing import Any, Optional
 
 import requests
@@ -63,8 +64,8 @@ class ReliefWebExtractor(JobExtractor):
     # Public interface
     # ------------------------------------------------------------------
 
-    def fetch(self, limit: int = 10) -> list[JobPost]:
-        raw = self._query_api(limit)
+    def fetch(self, limit: int = 10, since: Optional[date] = None) -> list[JobPost]:
+        raw = self._query_api(limit, since=since)
         posts = [self._parse(item) for item in raw]
         logger.info("ReliefWeb: fetched %d job(s)", len(posts))
         return posts
@@ -73,7 +74,7 @@ class ReliefWebExtractor(JobExtractor):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _query_api(self, limit: int) -> list[dict[str, Any]]:
+    def _query_api(self, limit: int, since: Optional[date] = None) -> list[dict[str, Any]]:
         # Per v2 docs: appname MUST be in the URL query string for both GET and POST.
         params = {
             "appname": self._app_name,
@@ -81,6 +82,39 @@ class ReliefWebExtractor(JobExtractor):
             "preset": "latest",
             "slim": "1",
         }
+
+        relevance_filter = {
+            "operator": "OR",
+            "conditions": [
+                {
+                    "field": "theme.id",
+                    "value": _TARGET_THEME_IDS,
+                    "operator": "OR",
+                },
+                {
+                    "operator": "OR",
+                    "conditions": [
+                        {"field": "title", "value": kw}
+                        for kw in _TITLE_KEYWORDS
+                    ],
+                },
+            ],
+        }
+
+        if since is not None:
+            api_filter = {
+                "operator": "AND",
+                "conditions": [
+                    relevance_filter,
+                    {
+                        "field": "date.created",
+                        "value": {"from": since.strftime("%Y-%m-%dT00:00:00+00:00")},
+                    },
+                ],
+            }
+        else:
+            api_filter = relevance_filter
+
         payload = {
             "offset": 0,
             "limit": limit,
@@ -100,23 +134,7 @@ class ReliefWebExtractor(JobExtractor):
                     "city.name",
                 ]
             },
-            "filter": {
-                "operator": "OR",
-                "conditions": [
-                    {
-                        "field": "theme.id",
-                        "value": _TARGET_THEME_IDS,
-                        "operator": "OR",
-                    },
-                    {
-                        "operator": "OR",
-                        "conditions": [
-                            {"field": "title", "value": kw}
-                            for kw in _TITLE_KEYWORDS
-                        ],
-                    },
-                ],
-            },
+            "filter": api_filter,
         }
 
         try:
