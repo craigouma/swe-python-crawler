@@ -35,6 +35,7 @@ def generate_status_page(
     stats: dict,
     scored_jobs: list,
     output_path: Optional[str] = None,
+    health_alerts: Optional[list] = None,
 ) -> None:
     """
     Update persistent data files and regenerate the HTML shell.
@@ -44,6 +45,8 @@ def generate_status_page(
 
     scored_jobs dicts expected:
         title, company, score, profile, source, link
+
+    health_alerts: list of extractor names currently in alert state (e.g. ["MyJobMag"])
     """
     if output_path is None:
         output_path = os.getenv("STATUS_PAGE_PATH", "/tmp/crawler_status.html")
@@ -81,9 +84,9 @@ def generate_status_page(
     history = new_entries + history
     _write_json(history_path, history)
 
-    # ── 2. Write latest run stats ───────────────────────────────────────────
+    # ── 2. Write latest run stats (includes health alerts for the JS banner) ──
     stats_path = out_dir / "stats_latest.json"
-    _write_json(stats_path, {**stats, "run_at": now_iso})
+    _write_json(stats_path, {**stats, "run_at": now_iso, "health_alerts": health_alerts or []})
 
     # ── 3. Write / refresh HTML shell ──────────────────────────────────────
     html_path = Path(output_path)
@@ -132,7 +135,11 @@ def _build_html_shell() -> str:
           fetch('./stats_latest.json?_=' + ts),
           fetch('./jobs_history.json?_=' + ts),
         ]);
-        if (statsRes.ok) renderStats(await statsRes.json());
+        if (statsRes.ok) {{
+          const s = await statsRes.json();
+          renderStats(s);
+          renderAlerts(s.health_alerts || []);
+        }}
         if (jobsRes.ok) {{
           allJobs = await jobsRes.json();
           currentPage = 1;
@@ -144,6 +151,19 @@ def _build_html_shell() -> str:
     }}
 
     // ── Renderers ────────────────────────────────────────────────────────────
+
+    function renderAlerts(alerts) {{
+      const banner = document.getElementById('health-alert-banner');
+      const list   = document.getElementById('health-alert-list');
+      if (!alerts || alerts.length === 0) {{
+        banner.classList.add('hidden');
+        return;
+      }}
+      list.innerHTML = alerts.map(name =>
+        `<li>&#9888; <strong>${{esc(name)}}</strong> has returned 0 jobs for 2+ consecutive runs — scraper may be broken. Check selectors or API endpoint.</li>`
+      ).join('');
+      banner.classList.remove('hidden');
+    }}
 
     function renderStats(s) {{
       set('stat-fetched', s.total_fetched ?? '—');
@@ -236,6 +256,19 @@ def _build_html_shell() -> str:
       <p class="text-xs text-zinc-500" id="stat-run-at"></p>
     </div>
   </header>
+
+  <!-- Health alert banner — shown dynamically by renderAlerts() -->
+  <div id="health-alert-banner" class="hidden border-l-4 border-red-500 bg-red-950/60 px-8 py-4">
+    <div class="mx-auto max-w-6xl flex items-start gap-3">
+      <span class="mt-0.5 text-red-400 text-xl leading-none">&#9888;</span>
+      <div>
+        <p class="text-sm font-bold text-red-300 uppercase tracking-wide mb-1">
+          Scraper Health Alert
+        </p>
+        <ul id="health-alert-list" class="text-sm text-red-200 space-y-1 list-none"></ul>
+      </div>
+    </div>
+  </div>
 
   <main class="mx-auto max-w-6xl px-8 py-10 space-y-10">
 

@@ -53,27 +53,46 @@ class MatchResult(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _apply_gap_penalty(cls, values: dict) -> dict:
+    def _apply_penalties(cls, values: dict) -> dict:
         """
-        Hard-clamp match_score based on the number of critical skill gaps.
-        This is a deterministic safety net — the model cannot hallucinate past it.
+        Deterministic safety net — the model cannot hallucinate past these rules.
 
-          3+ gaps  → score capped at 35  (role requires skills the candidate doesn't have)
-          1–2 gaps → score capped at 65  (partial match at best)
-          0 gaps   → full 0–100 range applies
+        Dealbreaker cap (checked first):
+          Any gap string containing "years experience", "certification", or
+          "outside candidate's domain" triggers the dealbreaker: score ≤ 19,
+          best_profile forced to "None".
+
+        Gap-count penalty (applied if no dealbreaker):
+          3+ gaps → score ≤ 35
+          1–2 gaps → score ≤ 65
+          0 gaps  → full range
+
+        Profile/score consistency:
+          "None" is only valid when score < 20.
         """
         missing = values.get("missing_critical_skills", [])
-        score = values.get("match_score", 0)
+        score   = values.get("match_score", 0)
         n = len(missing) if isinstance(missing, list) else 0
 
-        if n >= 3 and score > 35:
-            values["match_score"] = 35
-        elif n >= 1 and score > 65:
-            values["match_score"] = 65
+        _DEALBREAKER_MARKERS = ("years experience", "certification", "outside candidate")
+        is_dealbreaker = any(
+            any(marker in gap.lower() for marker in _DEALBREAKER_MARKERS)
+            for gap in (missing if isinstance(missing, list) else [])
+        )
 
-        # Enforce profile/score consistency: "None" is only valid below 20
-        if values.get("best_profile") == "None" and score >= 20:
-            values["best_profile"] = "IT_Support"  # safest fallback; prompt prevents this
+        if is_dealbreaker:
+            if score > 19:
+                values["match_score"] = 19
+            values["best_profile"] = "None"
+        else:
+            if n >= 3 and score > 35:
+                values["match_score"] = 35
+            elif n >= 1 and score > 65:
+                values["match_score"] = 65
+
+            # "None" profile is only valid below 20
+            if values.get("best_profile") == "None" and values.get("match_score", 0) >= 20:
+                values["best_profile"] = "IT_Support"
 
         return values
 
@@ -93,67 +112,103 @@ You are a ruthless, highly-calibrated technical recruiter evaluating a job posti
 for a single candidate. You think step-by-step and never skip steps.
 
 CANDIDATE: Craig Carlos Ouma
+Assume mid-level experience: ~3–5 years across all profiles.
 
 Profile 1 — IT_Support:
-  5+ yrs. Linux systems (advanced), VPS migration, disaster recovery, TCP/IP,
+  Linux systems (advanced), VPS migration, disaster recovery, TCP/IP,
   Apache/PHP-FPM, Bash/Python automation, Help Desk.
+  No certifications: no CISSP, no CISM, no CompTIA Security+, no CCNA.
 
 Profile 2 — Credit_Analyst:
-  5+ yrs. Credit risk assessment, financial statement analysis, KYC, portfolio
+  Credit risk assessment, financial statement analysis, KYC, portfolio
   monitoring (PAR), advanced Excel, SQL, Python, BigQuery.
+  No certifications: no CPA, no CFA, no ACCA.
 
 Profile 3 — Data_Analyst:
-  5+ yrs. Statistical analysis, hypothesis testing, BigQuery, Power BI,
+  Statistical analysis, hypothesis testing, BigQuery, Power BI,
   Looker Studio, Plotly Dash, ETL pipelines, Python/SQL/R.
+  No certifications: no AWS/Azure/GCP Professional certs, no CKA.
 
 Profile 4 — Software_Engineer:
-  5+ yrs. Full-stack & ML. Python, ReactJS, Node.js, FastAPI, Docker, GCP,
+  Full-stack & ML. Python, ReactJS, Node.js, FastAPI, Docker, GCP,
   Git, ETL, Plotly Dash.
+  No certifications: no AWS Solutions Architect, no CKA, no TOGAF.
 
 ─────────────────────────────────────────────────────────────────────────────
-EVALUATION PROCESS — you MUST follow these four steps in strict order:
+EVALUATION PROCESS — follow these steps in strict order, no exceptions:
+
+STEP 0 — DEALBREAKER CHECK (run this before anything else):
+  A dealbreaker immediately caps match_score at ≤ 19 and forces best_profile
+  to "None". Check all three conditions:
+
+  [DB-1] EXPERIENCE GAP:
+    Does the job explicitly require more years of experience than 3–5 years?
+    Examples that trigger this: "7+ years", "minimum 8 years", "10 years experience".
+    If yes → add "Requires X years experience (candidate has ~3–5 years)" to
+    missing_critical_skills.
+
+  [DB-2] MANDATORY CERTIFICATION:
+    Does the job require a specific advanced certification that Craig does not hold?
+    Certifications that always trigger this: CISSP, CISM, CRISC, CEH, OSCP,
+    CPA, CFA, ACCA, CISA, PMP, PRINCE2, AWS Professional/Specialty,
+    Azure Expert, GCP Professional, CKA, CKAD, TOGAF, Six Sigma Black Belt.
+    If yes → add "Requires [CERT NAME] certification (candidate does not hold this)"
+    to missing_critical_skills.
+
+  [DB-3] UNRELATED DOMAIN:
+    Is the job in a specialized domain that Craig has no background in?
+    Domains that always trigger this: Cybersecurity Operations / SOC management,
+    Core Banking / SWIFT / RTGS clearing, Clinical / Nursing / Healthcare,
+    Legal / Compliance Officer, Civil / Structural Engineering,
+    Supply Chain / Procurement management.
+    If yes → add "Role is in [DOMAIN] — outside candidate's domain" to
+    missing_critical_skills.
+
+  If ANY dealbreaker fires:
+    - missing_critical_skills must contain the exact dealbreaker string(s) above.
+    - match_score MUST be 0–19. No exceptions. Ignore all calibration rules below.
+    - best_profile MUST be "None".
+    - Stop. Do not apply further calibration.
 
 STEP 1 — missing_critical_skills (output this field first):
-  Read the job description carefully. List every skill, technology, certification,
-  or domain knowledge that the job explicitly requires AND that Craig clearly does
-  not have. Be specific and literal (e.g. "SWIFT/KEPSS RTGS", "SAP FICO module",
-  "Kubernetes CKA certification", "IFRS 9 credit modelling").
-  If nothing critical is missing, output an empty list: []
+  If no dealbreaker fired, list every other skill, technology, or domain knowledge
+  the job explicitly requires that Craig clearly does not have.
+  Be specific (e.g. "SWIFT/KEPSS RTGS", "SAP FICO module", "IFRS 9 modelling").
+  If nothing is missing, output an empty list: []
 
 STEP 2 — rationale (output this field second):
-  Write exactly 2 sentences explaining your evaluation. You must reference the
-  specific gaps identified in Step 1 OR the specific matches if there are no gaps.
+  Write exactly 2 sentences. Reference the specific gaps from Step 1 (or the
+  dealbreaker from Step 0) OR the specific matches if there are none.
   Do not introduce new information. Be blunt.
 
 STEP 3 — best_profile (output this field third):
-  Based on your reasoning above, name the closest matching profile.
-  Rules:
+  Name the closest matching profile. Rules:
+    - If a dealbreaker fired → must be "None".
     - NEVER output "None" if match_score will be 20 or higher.
-    - If multiple profiles partially match, pick the one with the greatest overlap.
-    - Only output "None" when there is zero meaningful overlap with any profile.
+    - If multiple profiles partially match, pick the greatest overlap.
 
 STEP 4 — match_score (output this field last):
-  Calculate the final integer score (0–100) ONLY after completing Steps 1–3.
+  Calculate the final integer (0–100) only after Steps 0–3 are complete.
 
-  PENALTY RULES — mandatory, not suggestions:
-    - 3 or more items in missing_critical_skills → score MUST be ≤ 35.
-    - 1–2 items in missing_critical_skills      → score MUST be ≤ 65.
-    - Empty missing_critical_skills             → use the full scale below.
+  PENALTY RULES (only if no dealbreaker fired):
+    - 3+ items in missing_critical_skills → score MUST be ≤ 35.
+    - 1–2 items in missing_critical_skills → score MUST be ≤ 65.
+    - Empty missing_critical_skills → use the full calibration scale below.
 
-  CALIBRATION (applies after penalties):
+  CALIBRATION (applies only when no dealbreaker and no gap penalty):
     - 90–100: explicit match on Python/SQL/Linux/BigQuery/ETL. No stretch needed.
-    - 75–89:  strong match to one profile; one or two minor gaps.
-    - 40–74:  genuine split — real overlap but real gaps too. Not a safe default.
+    - 75–89:  strong match; one or two minor gaps.
+    - 40–74:  genuine split — real overlap but real gaps. Not a safe default.
     - 15–39:  unfamiliar stack (Java/.NET/SAP only, no Python) or thin technical content.
     - 0–14:   zero overlap — teaching, pure sales, HR, legal.
 
   ANTI-HEDGING: never output 50, 55, 60, or 65 without a clear reason.
-    DevOps+Python+Docker+GCP        → ≥ 80
-    Data Analyst+BigQuery+ETL       → ≥ 85
-    Software Engineer+Python+FastAPI → ≥ 80
+    DevOps+Python+Docker+GCP          → ≥ 80
+    Data Analyst+BigQuery+ETL         → ≥ 85
+    Software Engineer+Python+FastAPI  → ≥ 80
     Credit/Financial Analyst+SQL+risk → ≥ 80
-    Java/.NET/SAP only, no Python   → ≤ 25
-    Teaching / HR / admin           → ≤ 10
+    Java/.NET/SAP only, no Python     → ≤ 25
+    Teaching / HR / admin             → ≤ 10
 
 ─────────────────────────────────────────────────────────────────────────────
 OUTPUT FORMAT:

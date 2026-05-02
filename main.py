@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from extractors import MyJobMagExtractor, ReliefWebExtractor
 from extractors.base import JobPost
+from health_monitor import update_and_get_alerts
 from matching import LocalMatcher
 from reporting import generate_status_page
 from storage import GoogleSheetsClient
@@ -35,20 +36,27 @@ HIGH_MATCH_THRESHOLD = 75
 
 # ── Pipeline steps ────────────────────────────────────────────────────────────
 
-def fetch_all() -> list[JobPost]:
+def fetch_all() -> tuple[list[JobPost], dict]:
+    """Returns (all_jobs, fetch_counts) where fetch_counts maps extractor name → job count."""
     jobs: list[JobPost] = []
+    fetch_counts: dict = {}
 
+    rw_jobs: list[JobPost] = []
     try:
         rw = ReliefWebExtractor()
-        jobs += rw.fetch(limit=50, since=DATE_CUTOFF)
+        rw_jobs = rw.fetch(limit=50, since=DATE_CUTOFF)
+        jobs += rw_jobs
     except ValueError as exc:
         logger.warning("ReliefWeb skipped: %s", exc)
+    fetch_counts["ReliefWeb"] = len(rw_jobs)
 
     mjm = MyJobMagExtractor()
-    jobs += mjm.fetch(limit=20)
+    mjm_jobs = mjm.fetch(limit=20)
+    jobs += mjm_jobs
+    fetch_counts["MyJobMag"] = len(mjm_jobs)
 
     logger.info("Fetched %d job(s) total.", len(jobs))
-    return jobs
+    return jobs, fetch_counts
 
 
 def filter_by_date(jobs: list[JobPost]) -> tuple[list[JobPost], int]:
@@ -127,8 +135,11 @@ def ingest(
 
 def main() -> None:
     # 1. Fetch
-    all_jobs = fetch_all()
+    all_jobs, fetch_counts = fetch_all()
     total_fetched = len(all_jobs)
+
+    # 1a. Health check — alert if any extractor has been silent for 2+ runs
+    health_alerts = update_and_get_alerts(fetch_counts)
 
     # 2. Date filter
     recent_jobs, skipped_old = filter_by_date(all_jobs)
@@ -171,7 +182,7 @@ def main() -> None:
         "STATUS_PAGE_PATH",
         "/home/craigouma/status.sowerved.tech/index.html",
     )
-    generate_status_page(stats, all_scored_jobs, output_path=status_path)
+    generate_status_page(stats, all_scored_jobs, output_path=status_path, health_alerts=health_alerts)
 
 
 if __name__ == "__main__":
